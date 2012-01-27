@@ -41,11 +41,11 @@ import siena.core.options.QueryOptionState;
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.services.dynamodb.AmazonDynamoDBClient;
-import com.amazonaws.services.simpledb.model.BatchDeleteAttributesRequest;
-import com.amazonaws.services.simpledb.model.BatchPutAttributesRequest;
+import com.amazonaws.services.dynamodb.model.BatchGetItemRequest;
+import com.amazonaws.services.dynamodb.model.BatchGetItemResult;
+import com.amazonaws.services.dynamodb.model.GetItemRequest;
+import com.amazonaws.services.dynamodb.model.GetItemResult;
 import com.amazonaws.services.simpledb.model.DeletableItem;
-import com.amazonaws.services.simpledb.model.GetAttributesRequest;
-import com.amazonaws.services.simpledb.model.GetAttributesResult;
 import com.amazonaws.services.simpledb.model.ReplaceableItem;
 import com.amazonaws.services.simpledb.model.SelectRequest;
 import com.amazonaws.services.simpledb.model.SelectResult;
@@ -118,42 +118,10 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 
 	@Override
 	public int insert(Iterable<?> objects) {
-		Map<String, List<ReplaceableItem>> doMap = new HashMap<String, List<ReplaceableItem>>(); 
 		int nb = 0;
 		for(Object obj: objects){
-			Class<?> clazz = obj.getClass();
-			String table = SdbMappingUtils.getTableName(clazz, prefix);
-			List<ReplaceableItem> doList = doMap.get(table); 
-			if(doList == null){
-				doList = new ArrayList<ReplaceableItem>();
-				doMap.put(table, doList);
-			}
-			doList.add(SdbMappingUtils.createItem(obj));
-			
+			insert(obj);			
 			nb++;
-		}
-		try {
-			for(String table: doMap.keySet()){
-				checkTable(table);			
-				List<ReplaceableItem> doList = doMap.get(table);
-				
-				int len = doList.size()> MAX_ITEMS_PER_CALL ? MAX_ITEMS_PER_CALL: doList.size();
-				for(int i=0; i < doList.size(); i += len){
-					int sz = i+len;
-					if(sz > doList.size()){
-						sz = doList.size();
-					}
-					
-					client.batchPutAttributes(
-							new BatchPutAttributesRequest(
-									table, 
-									doList.subList(i, sz)));			
-
-				}
-				
-			}
-		}catch(AmazonClientException ex){
-			throw new SienaException(ex);
 		}
 		return nb;
 	}
@@ -165,15 +133,16 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		String table = SdbMappingUtils.getTableName(clazz, prefix);
 		try {
 			checkTable(table);
-			GetAttributesRequest req = SdbMappingUtils.createGetRequest(table, clazz, obj);
+			GetItemRequest req = SdbMappingUtils.createGetRequest(table, clazz, obj);
 			// sets consistent read to true when reading one single object
 			req.setConsistentRead(isReadConsistent());
-			GetAttributesResult res = client.getAttributes(req);
-			if(res.getAttributes().size() == 0){
-				throw new SienaException(req.getItemName()+" not found in table "+req.getTableName());
+			GetItemResult res = client.getItem(req);
+			String itemName = SdbMappingUtils.getItemName(clazz, obj);
+			if(res.getItem().size() == 0){
+				throw new SienaException(itemName + " not found in table " + req.getTableName());
 			}
 				
-			SdbMappingUtils.fillModel(req.getItemName(), res, clazz, obj);
+			SdbMappingUtils.fillModel(itemName, res, clazz, obj);
 			
 			// join management
 			if(!info.joinFields.isEmpty()){
@@ -190,12 +159,12 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 
 	protected <T> int rawGet(Iterable<T> models) {
 		StringBuffer tableBuf = new StringBuffer();
-		SelectRequest req = SdbMappingUtils.buildBatchGetQuery(models, prefix, tableBuf);
-		req.setConsistentRead(isReadConsistent());
+		BatchGetItemRequest req = SdbMappingUtils.buildBatchGetQuery(models, prefix, tableBuf);
 		try {	
 			checkTable(tableBuf.toString());
-			SelectResult res = client.select(req);
-			int nb = SdbMappingUtils.mapSelectResult(res, models);
+			BatchGetItemResult res = client.batchGetItem(req);
+
+			int nb = SdbMappingUtils.mapSelectResult(res, models, prefix);
 			
 			// join management
 			// gets class
@@ -243,7 +212,7 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		
 		try {
 			checkTable(table);
-			client.putAttributes(SdbMappingUtils.createPutRequest(table, clazz, info, obj));
+			client.putItem(SdbMappingUtils.createPutRequest(table, clazz, info, obj));
 		}catch(AmazonClientException ex){
 			throw new SienaException(ex);
 		}
@@ -279,8 +248,8 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 					if(sz > doList.size()){
 						sz = doList.size();
 					}
-					client.batchPutAttributes(
-							new BatchPutAttributesRequest(
+					client.batchPutItem(
+							new BatchPutItemRequest(
 									table, 
 									doList.subList(i, sz)));			
 				}
@@ -299,7 +268,7 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		
 		try {
 			checkTable(table);
-			client.deleteAttributes(SdbMappingUtils.createDeleteRequest(table, clazz, obj));
+			client.deleteItem(SdbMappingUtils.createDeleteRequest(table, clazz, obj));
 		}catch(AmazonClientException ex){
 			throw new SienaException(ex);
 		}
@@ -335,8 +304,8 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 					if(sz > doList.size()){
 						sz = doList.size();
 					}
-					client.batchDeleteAttributes(
-							new BatchDeleteAttributesRequest(
+					client.batchDeleteItem(
+							new BatchDeleteItemRequest(
 									table, 
 									doList.subList(i, sz)));			
 
@@ -398,11 +367,11 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		String table = SdbMappingUtils.getTableName(clazz, prefix);
 		try {
 			checkTable(table);
-			GetAttributesRequest req = SdbMappingUtils.createGetRequestFromKey(table, clazz, key);
+			GetItemRequest req = SdbMappingUtils.createGetRequestFromKey(table, clazz, key);
 			// sets consistent read to true when reading one single object
 			req.setConsistentRead(isReadConsistent());
-			GetAttributesResult res = client.getAttributes(req);
-			if(res.getAttributes().size() == 0){
+			GetItemResult res = client.getItem(req);
+			if(res.getItem().size() == 0){
 				throw new SienaException(req.getItemName()+" not found in table "+req.getTableName());
 			}
 				
@@ -946,8 +915,8 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 				if(sz > doList.size()){
 					sz = doList.size();
 				}
-				client.batchDeleteAttributes(
-					new BatchDeleteAttributesRequest(
+				client.batchDeleteItem(
+					new BatchDeleteItemRequest(
 						table, 
 						doList.subList(i, sz)));			
 			}

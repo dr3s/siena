@@ -36,12 +36,17 @@ import siena.embed.JsonSerializer;
 import siena.sdb.ws.SimpleDB;
 
 import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.BatchGetItemRequest;
+import com.amazonaws.services.dynamodb.model.BatchGetItemResult;
+import com.amazonaws.services.dynamodb.model.BatchResponse;
+import com.amazonaws.services.dynamodb.model.DeleteItemRequest;
+import com.amazonaws.services.dynamodb.model.GetItemRequest;
+import com.amazonaws.services.dynamodb.model.GetItemResult;
+import com.amazonaws.services.dynamodb.model.Key;
+import com.amazonaws.services.dynamodb.model.KeysAndAttributes;
 import com.amazonaws.services.dynamodb.model.PutItemRequest;
 import com.amazonaws.services.simpledb.model.Attribute;
 import com.amazonaws.services.simpledb.model.DeletableItem;
-import com.amazonaws.services.simpledb.model.DeleteAttributesRequest;
-import com.amazonaws.services.simpledb.model.GetAttributesRequest;
-import com.amazonaws.services.simpledb.model.GetAttributesResult;
 import com.amazonaws.services.simpledb.model.Item;
 import com.amazonaws.services.simpledb.model.ReplaceableAttribute;
 import com.amazonaws.services.simpledb.model.ReplaceableItem;
@@ -49,6 +54,7 @@ import com.amazonaws.services.simpledb.model.SelectRequest;
 import com.amazonaws.services.simpledb.model.SelectResult;
 
 public class SdbMappingUtils {
+	protected static final String _ID_ATTR_NAME = "_id";
 	private static long ioffset = Math.abs(0L+Integer.MIN_VALUE);
 
 	public static String getTableName(Class<?> clazz, String prefix) {
@@ -149,7 +155,7 @@ public class SdbMappingUtils {
 	public static PutItemRequest createPutRequest(String table, Class<?> clazz, ClassInfo info, Object obj) {
 		PutItemRequest req = new PutItemRequest().withTableName(table);
 		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
-		item.put("_id", new AttributeValue(getItemName(clazz, obj)));
+		item.put(_ID_ATTR_NAME, new AttributeValue(getItemName(clazz, obj)));
 		
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {
 			try {
@@ -169,17 +175,17 @@ public class SdbMappingUtils {
 		return req;
 	}
 	
-	public static ReplaceableItem createItem(Object obj) {
+	public static Map<String, AttributeValue> createItem(Object obj) {
 		Class<?> clazz = obj.getClass();
 		
-		ReplaceableItem item = new ReplaceableItem(getItemName(clazz, obj));
+		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
+		item.put(_ID_ATTR_NAME, new AttributeValue(getItemName(clazz, obj)));
 		
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {
 			try {
 				String value = objectFieldToString(obj, field);
 				if(value != null){
-					ReplaceableAttribute attr = new ReplaceableAttribute(getAttributeName(field), value, true);
-					item.withAttributes(attr);
+					item.put(getAttributeName(field), new AttributeValue(value));
 				}else {
 					if (ClassInfo.isEmbeddedNative(field)){
 						SdbNativeSerializer.embed(item, ClassInfo.getSingleColumnName(field), value);						
@@ -203,23 +209,23 @@ public class SdbMappingUtils {
 		return new DeletableItem().withName(getItemNameFromKey(clazz, key));
 	}
 	
-	public static GetAttributesRequest createGetRequest(String domain, Class<?> clazz, Object obj) {
-		GetAttributesRequest req = 
-			new GetAttributesRequest().withDomainName(domain).withItemName(getItemName(clazz, obj));
+	public static GetItemRequest createGetRequest(String table, Class<?> clazz, Object obj) {
+		GetItemRequest req = 
+			new GetItemRequest().withTableName(table).withKey(new Key().withHashKeyElement(new AttributeValue(getItemName(clazz, obj))));
 		
 		return req;
 	}
 	
-	public static GetAttributesRequest createGetRequestFromKey(String domain, Class<?> clazz, Object key) {
-		GetAttributesRequest req = 
-			new GetAttributesRequest().withDomainName(domain).withItemName(key.toString());
+	public static GetItemRequest createGetRequestFromKey(String table, Class<?> clazz, Object key) {
+		GetItemRequest req = 
+			new GetItemRequest().withKey(new Key().withHashKeyElement(new AttributeValue((key.toString()))));
 		
 		return req;
 	}
 	
-	public static DeleteAttributesRequest createDeleteRequest(String domain, Class<?> clazz, Object obj) {
-		DeleteAttributesRequest req = 
-			new DeleteAttributesRequest().withDomainName(domain).withItemName(getItemName(clazz, obj));
+	public static DeleteItemRequest createDeleteRequest(String table, Class<?> clazz, Object obj) {
+		DeleteItemRequest req = 
+			new DeleteItemRequest().withTableName(table).withKey(new Key().withHashKeyElement(new AttributeValue(getItemName(clazz, obj))));
 		
 		return req;
 	}
@@ -386,24 +392,24 @@ public class SdbMappingUtils {
 		setFromString(obj, idField, itemName);
 	}
 	
-	public static void fillModel(String itemName, List<Attribute> attrs, Class<?> clazz, Object obj) {
+	public static void fillModel(String itemName, Map<String, AttributeValue> attrs, Class<?> clazz, Object obj) {
 		fillModelKeysOnly(itemName, clazz, obj);
 		
-		Attribute theAttr;
+		AttributeValue theAttrVal;
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {			
 			if(!ClassInfo.isEmbeddedNative(field)){
-				theAttr = null;
+				theAttrVal = null;
 				String attrName = getAttributeName(field);
-				// searches attribute and if found, removes it from the list to reduce number of attributes
-				for(Attribute attr: attrs){
-					if(attrName.equals(attr.getName())){
-						theAttr = attr;
+				// searches attribute and if found, removes it from the list to reduce number of item
+				for(Map.Entry<String, AttributeValue> attr: attrs.entrySet()){
+					if(attrName.equals(attr.getKey())){
+						theAttrVal = attr.getValue();
 						attrs.remove(attr);
 						break;
 					}
 				}
-				if(theAttr != null){
-					setFromString(obj, field, theAttr.getValue());
+				if(theAttrVal != null){
+					setFromString(obj, field, theAttrVal.getS());
 				}
 			}else {
 				Object value = SdbNativeSerializer.unembed(
@@ -413,40 +419,41 @@ public class SdbMappingUtils {
 		}	
 	}
 	
-	public static void fillModel(String itemName, GetAttributesResult res, Class<?> clazz, Object obj) {
-		fillModel(itemName, res.getAttributes(), clazz, obj);
+	public static void fillModel(String itemName, GetItemResult res, Class<?> clazz, Object obj) {
+		fillModel(itemName, res.getItem(), clazz, obj);
 	}
 	
-	public static void fillModel(Item item, Class<?> clazz, ClassInfo info, Object obj) {
-		fillModel(item.getName(), item.getAttributes(), clazz, obj);
+	public static void fillModel(String itemName, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
+		fillModel(itemName, item, clazz, obj);
 	}
 	
-	public static void fillModelKeysOnly(Item item, Class<?> clazz, ClassInfo info, Object obj) {
-		fillModelKeysOnly(item.getName(), clazz, obj);
+	public static void fillModelKeysOnly(String itemName, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
+		fillModelKeysOnly(itemName, clazz, obj);
 	}
 	
-	public static <T> int mapSelectResult(SelectResult res, Iterable<T> objects) {
-		List<Item> items = res.getItems();
+	public static <T> int mapSelectResult(BatchGetItemResult res, Iterable<T> objects, String prefix) {
+		Map<String, BatchResponse> respMap = res.getResponses();
+		
 		
 		Class<?> clazz = null;
 		ClassInfo info = null;
 		int nb = 0;
+		BatchResponse resp;
 		for(T obj: objects){
-			if(clazz == null){
-				clazz = obj.getClass();
-				info = ClassInfo.getClassInfo(clazz);				
-			}
+			clazz = obj.getClass();
+			info = ClassInfo.getClassInfo(clazz);	
+			resp = respMap.get(getTableName(clazz, prefix));
 			String itemName = getItemName(clazz, obj);
-			Item theItem = null;
-			for(Item item:items){
-				if(item.getName().equals(itemName)){
+			Map<String, AttributeValue> theItem = null;
+			for(Map<String, AttributeValue> item: resp.getItems()){
+				if(item.get(_ID_ATTR_NAME).equals(itemName)){
 					theItem = item;
-					items.remove(item);
+					resp.getItems().remove(item);
 					break;
 				}
 			}
 			if(theItem != null){
-				fillModel(theItem, clazz, info, obj);
+				fillModel(itemName, theItem, clazz, info, obj);
 				nb++;
 			}
 		}
@@ -460,6 +467,7 @@ public class SdbMappingUtils {
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
 		for(Item item: items){
 			T obj = Util.createObjectInstance(clazz);
+
 			fillModel(item, clazz, info, obj);
 			resList.add(obj);
 		}		
@@ -528,7 +536,7 @@ public class SdbMappingUtils {
 	public static int mapSelectResultToCount(SelectResult res) {
 		Item item = res.getItems().get(0);
 		if(item != null){
-			Attribute attr = item.getAttributes().get(0);
+			Attribute attr = item.getItem().get(0);
 			if("Count".equals(attr.getName())){
 				return Integer.parseInt(attr.getValue());
 			}
@@ -561,80 +569,76 @@ public class SdbMappingUtils {
 	public static final String EQ = " = ";
 
 
-	public static <T> SelectRequest buildBatchGetQuery(Iterable<T> objects, String prefix, StringBuffer domainBuf) {
+	public static <T> BatchGetItemRequest buildBatchGetQuery(Iterable<T> objects, String prefix, StringBuffer tableBuf) {
 		Class<?> clazz = null;
-		StringBuilder q = new StringBuilder();
-		String domain = null;
-		boolean first = true;
+		String table = null;
+
+		Map<String, KeysAndAttributes> batch = new HashMap<String, KeysAndAttributes>();
+		KeysAndAttributes ka;
 		for(T obj: objects){
-			if(clazz == null){
-				clazz = obj.getClass();
-				domain = getTableName(clazz, prefix);
-				domainBuf.append(domain);
-				q.append(SELECT + "*" + FROM + domain + WHERE + ITEM_NAME + IN_BEGIN);
+			
+			clazz = obj.getClass();
+			table = getTableName(clazz, prefix);
+			ka = batch.get(table);
+			if (ka == null) {
+				ka = new KeysAndAttributes();
 			}
 			
 			String itemName = getItemName(clazz, obj);
-			if(!first){
-				q.append(",");
-			} else {
-				first = false;
-			}
-			q.append(quote(itemName));
+			
+			ka.withKeys(new Key().withHashKeyElement(new AttributeValue(itemName)));
+			batch.put(table, ka);
 		}
 
-		q.append(IN_END);
 		
-		return new SelectRequest(q.toString());		
+		return new BatchGetItemRequest().withRequestItems(batch);		
 	}
 
-	public static <T> SelectRequest buildBatchGetQueryByKeys(Class<T> clazz, Iterable<?> keys, String prefix, StringBuffer domainBuf) {
-		String domain = getTableName(clazz, prefix);;
-		domainBuf.append(domain);
-		StringBuilder q = new StringBuilder();
+	public static <T> BatchGetItemRequest buildBatchGetQueryByKeys(Class<T> clazz, Iterable<?> keys, String prefix, StringBuffer tableBuf) {
 		
-		q.append(SELECT + "*" + FROM + domain + WHERE + ITEM_NAME + IN_BEGIN);
-		boolean first = true;
+		Map<String, KeysAndAttributes> batch = new HashMap<String, KeysAndAttributes>();
+		KeysAndAttributes ka;
+		String table = getTableName(clazz, prefix);
 		for(Object key: keys){			
 			String itemName = toString(key);
-			if(!first){
-				q.append(",");
-			} else {
-				first = false;
+			ka = batch.get(table);
+			if (ka == null) {
+				ka = new KeysAndAttributes();
 			}
-			q.append(quote(itemName));
+			
+			ka.withKeys(new Key().withHashKeyElement(new AttributeValue(itemName)));
+			batch.put(table, ka);
 		}
 
-		q.append(IN_END);
 		
-		return new SelectRequest(q.toString());		
+		return new BatchGetItemRequest().withRequestItems(batch);		
 	}
 	
-	public static <T> SelectRequest buildCountQuery(Query<T> query, String prefix, StringBuffer domainBuf) {
-		String domain = getTableName(query.getQueriedClass(), prefix);;
-		domainBuf.append(domain);
+	public static <T> SelectRequest buildCountQuery(Query<T> query, String prefix, StringBuffer tableBuf) {
+		String table = getTableName(query.getQueriedClass(), prefix);;
+		tableBuf.append(table);
 		StringBuilder q = new StringBuilder();
 		
-		q.append(SELECT + COUNT_BEGIN + "*" + COUNT_END + FROM + domain);
+		q.append(SELECT + COUNT_BEGIN + "*" + COUNT_END + FROM + table);
 		
 		return new SelectRequest(buildFilterOrder(query, q).toString());		
 	}
 	
-	public static <T> SelectRequest buildQuery(Query<T> query, String prefix, StringBuffer domainBuf) {	
+	public static <T> SelectRequest buildQuery(Query<T> query, String prefix, StringBuffer tableBuf) {	
 		Class<?> clazz = query.getQueriedClass();
-		String domain = getTableName(clazz, prefix);
-		domainBuf.append(domain);
+		String table = getTableName(clazz, prefix);
+		tableBuf.append(table);
 		QueryOptionFetchType fetchType = (QueryOptionFetchType)query.option(QueryOptionFetchType.ID);
 
 		StringBuilder q = new StringBuilder();
 		
 		switch(fetchType.fetchType){
 		case KEYS_ONLY:
-			q.append(SELECT + ITEM_NAME + FROM + domain);
+			q.append(SELECT + ITEM_NAME + FROM + table);
 			break;
 		case NORMAL:
 		default:
-			q.append(SELECT + ALL_COLS + FROM + domain);
+			q.append(SELECT + ALL_COLS + FROM + table);
 			break;
 		}
 		

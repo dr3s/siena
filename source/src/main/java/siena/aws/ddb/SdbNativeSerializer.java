@@ -75,31 +75,31 @@ public class SdbNativeSerializer {
 	}
 	
 	public static <T> T unembed(
-			Class<T> clazz, String embeddingFieldName, List<Attribute> attrs){
+			Class<T> clazz, String embeddingFieldName, Map<String, AttributeValue> attrs){
 		if(clazz.isArray() || Collection.class.isAssignableFrom(clazz)){
 			throw new SienaException("can't serializer Array/Collection in native mode");
 		}
 
 		T obj = Util.createObjectInstance(clazz);
 		try {
-			Attribute theAttr;
+			AttributeValue theAttrValue;
 			
 			for (Field f : ClassInfo.getClassInfo(clazz).updateFields) {
 				if(!ClassInfo.isEmbeddedNative(f)){
 					// doesn't try to analyze fields, just try to store it
 					String attrName = getEmbeddedAttributeName(embeddingFieldName, f);			
 					
-					theAttr = null;
+					theAttrValue = null;
 					// searches attribute and if found, removes it from the list to reduce number of attributes
-					for(Attribute attr: attrs){
-						if(attrName.equals(attr.getName())){
-							theAttr = attr;
+					for(Map.Entry<String, AttributeValue>  attr: attrs.entrySet()){
+						if(attrName.equals(attr.getKey())){
+							theAttrValue = attr.getValue();
 							attrs.remove(attr);
 							break;
 						}
 					}
-					if(theAttr != null){
-						SdbMappingUtils.setFromString(obj, f, theAttr.getValue());
+					if(theAttrValue != null){
+						SdbMappingUtils.setFromString(obj, f, theAttrValue.getS());
 					}
 				} else {
 					Object value = SdbNativeSerializer.unembed(
