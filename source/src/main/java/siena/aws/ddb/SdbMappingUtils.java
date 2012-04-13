@@ -36,6 +36,7 @@ import siena.embed.JsonSerializer;
 import siena.sdb.ws.SimpleDB;
 
 import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.AttributeValueUpdate;
 import com.amazonaws.services.dynamodb.model.BatchGetItemRequest;
 import com.amazonaws.services.dynamodb.model.BatchGetItemResult;
 import com.amazonaws.services.dynamodb.model.BatchResponse;
@@ -60,7 +61,7 @@ public class SdbMappingUtils {
 	public static String getTableName(Class<?> clazz, String prefix) {
 		ClassInfo ci = ClassInfo.getClassInfo(clazz);
 		if(ClassInfo.isAutoIncrement(ci.getIdField())){
-			throw new SienaRestrictedApiException("DB", "getItemName", "@Id AUTO_INCREMENT not supported by SDB");
+			throw new SienaRestrictedApiException("DB", "getkey", "@Id AUTO_INCREMENT not supported by SDB");
 		}
 		String table = prefix + ci.tableName;
 		return table;
@@ -75,7 +76,7 @@ public class SdbMappingUtils {
 	}
 		
 	
-	public static String getItemName(Class<?> clazz, Object obj){
+	public static Key getkey(Class<?> clazz, Object obj){
 		Field idField = ClassInfo.getIdField(clazz);
 		Id id = idField.getAnnotation(Id.class);
 
@@ -92,7 +93,7 @@ public class SdbMappingUtils {
 			}
 			case AUTO_INCREMENT:
 				// manages String ID as not long!!!
-				throw new SienaRestrictedApiException("DB", "getItemName", "@Id AUTO_INCREMENT not supported by SDB");
+				throw new SienaRestrictedApiException("DB", "getkey", "@Id AUTO_INCREMENT not supported by SDB");
 			case UUID:
 			{
 				Object idVal = Util.readField(obj, idField);
@@ -107,7 +108,7 @@ public class SdbMappingUtils {
 						Util.setField(obj, idField, uuid.toString());
 					}
 					else {
-						throw new SienaRestrictedApiException("DB", "getItemName", "@Id UUID must be of type String or UUID");
+						throw new SienaRestrictedApiException("DB", "getkey", "@Id UUID must be of type String or UUID");
 					}
 				}else {
 					keyVal = toString(idField, idVal);
@@ -120,10 +121,10 @@ public class SdbMappingUtils {
 		}
 		else throw new SienaException("Field " + idField.getName() + " is not an @Id field");
 
-		return keyVal;
+		return new Key().withHashKeyElement(new AttributeValue(keyVal));
 	}
 	
-	public static String getItemNameFromKey(Class<?> clazz, Object key){
+	public static Key getkeyFromKey(Class<?> clazz, Object key){
 		Field idField = ClassInfo.getIdField(clazz);
 		Id id = idField.getAnnotation(Id.class);
 
@@ -137,7 +138,7 @@ public class SdbMappingUtils {
 			}
 			case AUTO_INCREMENT:
 				// manages String ID as not long!!!
-				throw new SienaRestrictedApiException("DB", "getItemName", "@Id AUTO_INCREMENT not supported by SDB");
+				throw new SienaRestrictedApiException("DB", "getkey", "@Id AUTO_INCREMENT not supported by SDB");
 			case UUID:
 			{
 				keyVal = toString(idField, key);				
@@ -149,13 +150,13 @@ public class SdbMappingUtils {
 		}
 		else throw new SienaException("Field " + idField.getName() + " is not an @Id field");
 
-		return keyVal;
+		return new Key().withHashKeyElement(new AttributeValue(keyVal));
 	}	
 	
 	public static PutItemRequest createPutRequest(String table, Class<?> clazz, ClassInfo info, Object obj) {
 		PutItemRequest req = new PutItemRequest().withTableName(table);
 		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
-		item.put(_ID_ATTR_NAME, new AttributeValue(getItemName(clazz, obj)));
+		item.put(_ID_ATTR_NAME, getkey(clazz, obj).getHashKeyElement());
 		
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {
 			try {
@@ -179,7 +180,7 @@ public class SdbMappingUtils {
 		Class<?> clazz = obj.getClass();
 		
 		Map<String, AttributeValue> item = new HashMap<String, AttributeValue>();
-		item.put(_ID_ATTR_NAME, new AttributeValue(getItemName(clazz, obj)));
+		item.put(_ID_ATTR_NAME, getkey(clazz, obj).getHashKeyElement());
 		
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {
 			try {
@@ -198,34 +199,58 @@ public class SdbMappingUtils {
 
 		return item;
 	}
-
-	public static DeletableItem createDeletableItem(Object obj) {
-		Class<?> clazz = obj.getClass();
-		
-		return new DeletableItem().withName(getItemName(clazz, obj));
-	}
 	
-	public static <T> DeletableItem createDeletableItemFromKey(Class<T> clazz, Object key) {	
-		return new DeletableItem().withName(getItemNameFromKey(clazz, key));
+	public static Map<String, AttributeValueUpdate> createUpdateItem(Object obj) {
+		Class<?> clazz = obj.getClass();
+
+		Map<String, AttributeValueUpdate> item = new HashMap<String, AttributeValueUpdate>();
+		item.put(_ID_ATTR_NAME, new AttributeValueUpdate()
+				.withValue(getkey(clazz, obj).getHashKeyElement()));
+
+		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {
+			try {
+				String value = objectFieldToString(obj, field);
+				if (value != null) {
+					item.put(getAttributeName(field),
+							new AttributeValueUpdate()
+									.withValue(new AttributeValue(value)));
+				} else {
+					if (ClassInfo.isEmbeddedNative(field)) {
+						Map<String, AttributeValue> temp = new HashMap<String, AttributeValue>();
+						SdbNativeSerializer.embed(temp,
+								ClassInfo.getSingleColumnName(field), value);
+						//TODO improve API
+						AttributeValue attrVal = temp.values().iterator().next();
+						item.put(getAttributeName(field),
+								new AttributeValueUpdate()
+										.withValue(attrVal));
+					}
+				}
+			} catch (Exception e) {
+				throw new SienaException(e);
+			}
+		}
+
+		return item;
 	}
 	
 	public static GetItemRequest createGetRequest(String table, Class<?> clazz, Object obj) {
 		GetItemRequest req = 
-			new GetItemRequest().withTableName(table).withKey(new Key().withHashKeyElement(new AttributeValue(getItemName(clazz, obj))));
+			new GetItemRequest().withTableName(table).withKey(getkey(clazz, obj));
 		
 		return req;
 	}
 	
 	public static GetItemRequest createGetRequestFromKey(String table, Class<?> clazz, Object key) {
 		GetItemRequest req = 
-			new GetItemRequest().withKey(new Key().withHashKeyElement(new AttributeValue((key.toString()))));
+			new GetItemRequest().withKey(getkeyFromKey(clazz, key));
 		
 		return req;
 	}
 	
 	public static DeleteItemRequest createDeleteRequest(String table, Class<?> clazz, Object obj) {
 		DeleteItemRequest req = 
-			new DeleteItemRequest().withTableName(table).withKey(new Key().withHashKeyElement(new AttributeValue(getItemName(clazz, obj))));
+			new DeleteItemRequest().withTableName(table).withKey(getkey(clazz, obj));
 		
 		return req;
 	}
@@ -387,13 +412,13 @@ public class SdbMappingUtils {
 		Util.setFromObject(obj, field, val);
 	}
 	
-	public static void fillModelKeysOnly(String itemName, Class<?> clazz, Object obj) {
+	public static void fillModelKeysOnly(Key key, Class<?> clazz, Object obj) {
 		Field idField = ClassInfo.getIdField(clazz);
-		setFromString(obj, idField, itemName);
+		setFromString(obj, idField, key.getHashKeyElement().getS());
 	}
 	
-	public static void fillModel(String itemName, Map<String, AttributeValue> attrs, Class<?> clazz, Object obj) {
-		fillModelKeysOnly(itemName, clazz, obj);
+	public static void fillModel(Key key, Map<String, AttributeValue> attrs, Class<?> clazz, Object obj) {
+		fillModelKeysOnly(key, clazz, obj);
 		
 		AttributeValue theAttrVal;
 		for (Field field : ClassInfo.getClassInfo(clazz).updateFields) {			
@@ -419,16 +444,16 @@ public class SdbMappingUtils {
 		}	
 	}
 	
-	public static void fillModel(String itemName, GetItemResult res, Class<?> clazz, Object obj) {
-		fillModel(itemName, res.getItem(), clazz, obj);
+	public static void fillModel(Key key, GetItemResult res, Class<?> clazz, Object obj) {
+		fillModel(key, res.getItem(), clazz, obj);
 	}
 	
-	public static void fillModel(String itemName, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
-		fillModel(itemName, item, clazz, obj);
+	public static void fillModel(Key key, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
+		fillModel(key, item, clazz, obj);
 	}
 	
-	public static void fillModelKeysOnly(String itemName, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
-		fillModelKeysOnly(itemName, clazz, obj);
+	public static void fillModelKeysOnly(Key key, Map<String, AttributeValue> item, Class<?> clazz, ClassInfo info, Object obj) {
+		fillModelKeysOnly(key, clazz, obj);
 	}
 	
 	public static <T> int mapSelectResult(BatchGetItemResult res, Iterable<T> objects, String prefix) {
@@ -443,17 +468,17 @@ public class SdbMappingUtils {
 			clazz = obj.getClass();
 			info = ClassInfo.getClassInfo(clazz);	
 			resp = respMap.get(getTableName(clazz, prefix));
-			String itemName = getItemName(clazz, obj);
+			Key key = getkey(clazz, obj);
 			Map<String, AttributeValue> theItem = null;
 			for(Map<String, AttributeValue> item: resp.getItems()){
-				if(item.get(_ID_ATTR_NAME).equals(itemName)){
+				if(item.get(_ID_ATTR_NAME).equals(key.getHashKeyElement())){
 					theItem = item;
 					resp.getItems().remove(item);
 					break;
 				}
 			}
 			if(theItem != null){
-				fillModel(itemName, theItem, clazz, info, obj);
+				fillModel(key, theItem, clazz, info, obj);
 				nb++;
 			}
 		}
@@ -461,7 +486,7 @@ public class SdbMappingUtils {
 		return nb;
 	}
 	
-	public static <T> void mapSelectResultToList(SelectResult res, List<T> resList, Class<T> clazz) {
+	public static <T> void mapSelectResultToList(BatchGetItemResult res, List<T> resList, Class<T> clazz) {
 		List<Item> items = res.getItems();
 		
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
@@ -473,7 +498,7 @@ public class SdbMappingUtils {
 		}		
 	}
 	
-	public static <T> void mapSelectResultToList(SelectResult res, List<T> resList, Class<T> clazz, int offset) {
+	public static <T> void mapSelectResultToList(BatchGetItemResult res, List<T> resList, Class<T> clazz, int offset) {
 		List<Item> items = res.getItems();
 		
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
@@ -486,7 +511,7 @@ public class SdbMappingUtils {
 	}
 	
 	
-	public static <T> void mapSelectResultToListKeysOnly(SelectResult res, List<T> resList, Class<T> clazz) {
+	public static <T> void mapSelectResultToListKeysOnly(BatchGetItemResult res, List<T> resList, Class<T> clazz) {
 		List<Item> items = res.getItems();
 		
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
@@ -497,7 +522,7 @@ public class SdbMappingUtils {
 		}		
 	}
 	
-	public static <T> void mapSelectResultToListKeysOnly(SelectResult res, List<T> resList, Class<T> clazz, int offset) {
+	public static <T> void mapSelectResultToListKeysOnly(BatchGetItemResult res, List<T> resList, Class<T> clazz, int offset) {
 		List<Item> items = res.getItems();
 		
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
@@ -509,7 +534,7 @@ public class SdbMappingUtils {
 		}
 	}
 	
-	public static <T> void mapSelectResultToListOrderedFromKeys(SelectResult res, List<T> resList, Class<T> clazz, Iterable<?> keys) {
+	public static <T> void mapSelectResultToListOrderedFromKeys(BatchGetItemResult res, List<T> resList, Class<T> clazz, Iterable<?> keys) {
 		List<Item> items = res.getItems();
 		
 		ClassInfo info = ClassInfo.getClassInfo(clazz);
@@ -517,7 +542,7 @@ public class SdbMappingUtils {
 		for(Object key: keys){
 			found = false;
 			for(Item item: items){
-				if(item.getName().equals(getItemNameFromKey(clazz, key))){
+				if(item.getName().equals(getkeyFromKey(clazz, key))){
 					T obj = Util.createObjectInstance(clazz);
 					fillModel(item, clazz, info, obj);
 					resList.add(obj);
@@ -554,7 +579,7 @@ public class SdbMappingUtils {
 	public static final String OR = " or ";
 	public static final String IS_NULL = " is null ";
 	public static final String IS_NOT_NULL = " is not null ";
-	public static final String ITEM_NAME = "itemName()";
+	public static final String ITEM_NAME = "key()";
 	public static final String ALL_COLS = "*";
 	public static final String SELECT = "select ";
 	public static final String FROM = " from ";
@@ -584,9 +609,9 @@ public class SdbMappingUtils {
 				ka = new KeysAndAttributes();
 			}
 			
-			String itemName = getItemName(clazz, obj);
+			String key = getkey(clazz, obj);
 			
-			ka.withKeys(new Key().withHashKeyElement(new AttributeValue(itemName)));
+			ka.withKeys(new Key().withHashKeyElement(new AttributeValue(key)));
 			batch.put(table, ka);
 		}
 
@@ -600,13 +625,13 @@ public class SdbMappingUtils {
 		KeysAndAttributes ka;
 		String table = getTableName(clazz, prefix);
 		for(Object key: keys){			
-			String itemName = toString(key);
+			Key keyVal = getkeyFromKey(clazz, key);
 			ka = batch.get(table);
 			if (ka == null) {
 				ka = new KeysAndAttributes();
 			}
 			
-			ka.withKeys(new Key().withHashKeyElement(new AttributeValue(itemName)));
+			ka.withKeys(keyVal);
 			batch.put(table, ka);
 		}
 
@@ -709,7 +734,7 @@ public class SdbMappingUtils {
 					} else {
 						String column = null;
 						if(ClassInfo.isId(f)) {
-							column = "itemName()";
+							column = "key()";
 							
 							if(value == null && op.equals("=")) {
 								throw new SienaException("SDB filter on @Id field with 'IS NULL' is not possible");
@@ -762,7 +787,7 @@ public class SdbMappingUtils {
 							
 							String column = null;
 							if(ClassInfo.isId(field)) {
-								column = "itemName()";
+								column = "key()";
 							} else {
 								column = ClassInfo.getColumnNames(field)[0];
 							}

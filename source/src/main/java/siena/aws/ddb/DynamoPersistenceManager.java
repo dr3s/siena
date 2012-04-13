@@ -41,10 +41,16 @@ import siena.core.options.QueryOptionState;
 import com.amazonaws.AmazonClientException;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.services.dynamodb.AmazonDynamoDBClient;
+import com.amazonaws.services.dynamodb.model.AttributeValue;
+import com.amazonaws.services.dynamodb.model.AttributeValueUpdate;
 import com.amazonaws.services.dynamodb.model.BatchGetItemRequest;
 import com.amazonaws.services.dynamodb.model.BatchGetItemResult;
+import com.amazonaws.services.dynamodb.model.DeleteItemRequest;
 import com.amazonaws.services.dynamodb.model.GetItemRequest;
 import com.amazonaws.services.dynamodb.model.GetItemResult;
+import com.amazonaws.services.dynamodb.model.Key;
+import com.amazonaws.services.dynamodb.model.ReturnValue;
+import com.amazonaws.services.dynamodb.model.UpdateItemRequest;
 import com.amazonaws.services.simpledb.model.DeletableItem;
 import com.amazonaws.services.simpledb.model.ReplaceableItem;
 import com.amazonaws.services.simpledb.model.SelectRequest;
@@ -137,12 +143,12 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 			// sets consistent read to true when reading one single object
 			req.setConsistentRead(isReadConsistent());
 			GetItemResult res = client.getItem(req);
-			String itemName = SdbMappingUtils.getItemName(clazz, obj);
+			Key key = SdbMappingUtils.getkey(clazz, obj);
 			if(res.getItem().size() == 0){
-				throw new SienaException(itemName + " not found in table " + req.getTableName());
+				throw new SienaException(key + " not found in table " + req.getTableName());
 			}
 				
-			SdbMappingUtils.fillModel(itemName, res, clazz, obj);
+			SdbMappingUtils.fillModel(key, res, clazz, obj);
 			
 			// join management
 			if(!info.joinFields.isEmpty()){
@@ -223,43 +229,32 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 	}
 
 	public <T> int update(Iterable<T> models) {
-		Map<String, List<ReplaceableItem>> doMap = new HashMap<String, List<ReplaceableItem>>(); 
 		int nb = 0;
-		for(Object obj: models){
+
+		for (Object obj : models) {
 			Class<?> clazz = obj.getClass();
 			String table = SdbMappingUtils.getTableName(clazz, prefix);
-			List<ReplaceableItem> doList = doMap.get(table); 
-			if(doList == null){
-				doList = new ArrayList<ReplaceableItem>();
-				doMap.put(table, doList);
+			Map<String, AttributeValueUpdate> updateItems = SdbMappingUtils
+					.createUpdateItem(obj);
+			AttributeValueUpdate keyAttr = updateItems
+					.remove(SdbMappingUtils._ID_ATTR_NAME);
+			Key key = new Key().withHashKeyElement(keyAttr.getValue());
+			ReturnValue returnValues = ReturnValue.ALL_NEW;
+			try {
+				UpdateItemRequest updateItemRequest = new UpdateItemRequest()
+						.withTableName(table).withKey(key)
+						.withAttributeUpdates(updateItems)
+						.withReturnValues(returnValues);
+
+				client.updateItem(updateItemRequest);
+			} catch (AmazonClientException ex) {
+				throw new SienaException(ex);
 			}
-			doList.add(SdbMappingUtils.createItem(obj));
-			
 			nb++;
 		}
-		try {
-			for(String table: doMap.keySet()){
-				checkTable(table);			
-				List<ReplaceableItem> doList = doMap.get(table);
-				
-				int len = doList.size()> MAX_ITEMS_PER_CALL ? MAX_ITEMS_PER_CALL: doList.size();
-				for(int i=0; i < doList.size(); i += len){
-					int sz = i+len;
-					if(sz > doList.size()){
-						sz = doList.size();
-					}
-					client.batchPutItem(
-							new BatchPutItemRequest(
-									table, 
-									doList.subList(i, sz)));			
-				}
-			}
-		}catch(AmazonClientException ex){
-			throw new SienaException(ex);
-		}
+
 		return nb;
 	}
-
 	
 	public void delete(Object obj) {
 		Class<?> clazz = obj.getClass();
@@ -280,40 +275,12 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 
 	@Override
 	public int delete(Iterable<?> models) {
-		Map<String, List<DeletableItem>> doMap = new HashMap<String, List<DeletableItem>>(); 
 		int nb = 0;
 		for(Object obj: models){
-			Class<?> clazz = obj.getClass();
-			String table = SdbMappingUtils.getTableName(clazz, prefix);
-			List<DeletableItem> doList = doMap.get(table); 
-			if(doList == null){
-				doList = new ArrayList<DeletableItem>();
-				doMap.put(table, doList);
-			}
-			doList.add(SdbMappingUtils.createDeletableItem(obj));
-			
+			delete(obj);			
 			nb++;
 		}
-		try {
-			for(String table: doMap.keySet()){
-				checkTable(table);			
-				List<DeletableItem> doList = doMap.get(table);
-				int len = doList.size() > MAX_ITEMS_PER_CALL ? MAX_ITEMS_PER_CALL: doList.size();
-				for(int i=0; i < doList.size(); i += len){
-					int sz = i+len;
-					if(sz > doList.size()){
-						sz = doList.size();
-					}
-					client.batchDeleteItem(
-							new BatchDeleteItemRequest(
-									table, 
-									doList.subList(i, sz)));			
-
-				}
-			}		
-		}catch(AmazonClientException ex){
-			throw new SienaException(ex);
-		}
+		
 		return nb;
 	}
 	
@@ -372,12 +339,12 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 			req.setConsistentRead(isReadConsistent());
 			GetItemResult res = client.getItem(req);
 			if(res.getItem().size() == 0){
-				throw new SienaException(req.getItemName()+" not found in table "+req.getTableName());
+				throw new SienaException(req.getKey()+" not found in table "+req.getTableName());
 			}
 				
 			T obj = Util.createObjectInstance(clazz);
 
-			SdbMappingUtils.fillModel(req.getItemName(), res, clazz, obj);
+			SdbMappingUtils.fillModel(req.getKey(), res, clazz, obj);
 			
 			// join management
 			if(!ClassInfo.getClassInfo(clazz).joinFields.isEmpty()){
@@ -398,10 +365,11 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		try {	
 			StringBuffer tableBuf = new StringBuffer();
 
-			SelectRequest req = SdbMappingUtils.buildBatchGetQueryByKeys(clazz, keys, prefix, tableBuf);
+			BatchGetItemRequest req = SdbMappingUtils.buildBatchGetQueryByKeys(clazz, keys, prefix, tableBuf);
 			checkTable(tableBuf.toString());
-			req.setConsistentRead(isReadConsistent());
-			SelectResult res = client.select(req);
+//			TODO consistency guarantee
+//			req.getRequestClientOptions().setConsistentRead(isReadConsistent());
+			BatchGetItemResult res = client.batchGetItem(req);
 			List<T> models = new ArrayList<T>(); 
 				
 			SdbMappingUtils.mapSelectResultToListOrderedFromKeys(res, models, clazz, keys);
@@ -904,7 +872,10 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 		int nb = 0;
 		String table = SdbMappingUtils.getTableName(clazz, prefix);
 		for(Object key: keys){
-			doList.add(SdbMappingUtils.createDeletableItemFromKey(clazz, key));			
+			client.deleteItem(
+					new DeleteItemRequest(
+						table, 
+						SdbMappingUtils.getkeyFromKey(clazz, key)));	
 			nb++;
 		}
 		try {
@@ -915,10 +886,7 @@ public class DynamoPersistenceManager extends AbstractPersistenceManager {
 				if(sz > doList.size()){
 					sz = doList.size();
 				}
-				client.batchDeleteItem(
-					new BatchDeleteItemRequest(
-						table, 
-						doList.subList(i, sz)));			
+						
 			}
 		}catch(AmazonClientException ex){
 			throw new SienaException(ex);
